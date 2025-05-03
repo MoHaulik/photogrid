@@ -56,15 +56,15 @@
       box-shadow: 0 4px 6px rgba(0,0,0,0.1);
     }
     #photo-grid-container {
-      position: absolute;
+      position: fixed;
       top: 0;
       left: 0;
-      width: 100%;
-      height: 100%;
-      display: none;
+      width: 100vw;
+      height: 100vh;
       perspective: 1000px;
       overflow: hidden;
-      z-index: 0;
+      z-index: 100;
+      pointer-events: none;
     }
     #photo-grid {
       width: 100%;
@@ -76,8 +76,10 @@
       grid-gap: 10px;
       padding: 10px;
       transform-origin: center top;
-      transform: rotateX(70deg) translateY(-50%);
-      background: rgba(0, 0, 0, 0.7);
+      transform: rotateX(60deg) translateY(-30%);
+      background: rgba(0, 0, 0, 0.8);
+      backdrop-filter: blur(5px);
+      box-shadow: 0 0 30px rgba(0,0,0,0.7);
     }
     .photo-item {
       width: 100%;
@@ -115,9 +117,8 @@
     let controller;
     let isGridVisible = false;
     let lastControllerRotation = new THREE.Euler();
-    let lastHeadPitch = 0;
     const GRID_STEP = 200; // px per scroll
-    const HEAD_TILT_THRESHOLD = 0.2; // radians (approx 11.5 degrees)
+    const HEAD_TILT_THRESHOLD = 0.4; // radians (approx 23 degrees)
     const CONTROLLER_ROTATION_THRESHOLD = 0.15; // radians
     let lastScrollTime = 0;
     const SCROLL_COOLDOWN = 300; // ms between scrolls
@@ -207,7 +208,10 @@
       renderer.xr.setReferenceSpaceType('local');
       renderer.xr.setSession(session);
       document.getElementById('start-button').style.display = 'none';
-      updateStatus('AR session started. Tilt your head up to see photo grid. Twist controller to scroll.');
+      updateStatus('AR session started. Look UP toward the ceiling to see photo grid. Twist controller to scroll.');
+      
+      // Make photo grid container always present but initially invisible
+      document.getElementById('photo-grid-container').style.display = 'none';
 
       setupController(session);
 
@@ -224,7 +228,7 @@
     function setupController() {
       controller = renderer.xr.getController(0);
       controller.addEventListener('connected', (event) => {
-        updateStatus(`Controller connected: ${event.data.handedness}. Tilt head up to see grid.`);
+        updateStatus(`Controller connected: ${event.data.handedness}. LOOK UP at the ceiling to see grid.`);
       });
       scene.add(controller);
 
@@ -248,26 +252,33 @@
       const viewerPose = frame.getViewerPose(renderer.xr.getReferenceSpace());
       if (!viewerPose) return;
       
-      // Get head rotation
+      // Get head orientation and position
       const headOrientation = new THREE.Quaternion().fromArray(viewerPose.transform.orientation);
-      const headEuler = new THREE.Euler().setFromQuaternion(headOrientation);
       
-      // Check if looking up (negative pitch in this coordinate system)
-      const headPitch = headEuler.x;
+      // Create a direction vector pointing forward in head space
+      const forwardVector = new THREE.Vector3(0, 0, -1);
+      forwardVector.applyQuaternion(headOrientation);
       
-      if (headPitch < -HEAD_TILT_THRESHOLD && !isGridVisible) {
+      // Calculate the angle between forward vector and up vector
+      // This gives us a more reliable way to detect if user is looking up
+      const upVector = new THREE.Vector3(0, 1, 0);
+      const angleBetween = forwardVector.angleTo(upVector);
+      
+      console.log('Head angle:', THREE.MathUtils.radToDeg(angleBetween));
+      
+      // We want to check if user is looking up (angle would be less than 90 degrees)
+      // Lower values mean looking more upward
+      if (angleBetween < Math.PI/2 - HEAD_TILT_THRESHOLD && !isGridVisible) {
         // Head is tilted up, show grid
         document.getElementById('photo-grid-container').style.display = 'block';
         isGridVisible = true;
         updateStatus('Photo grid visible. Twist controller to scroll.');
-      } else if (headPitch >= -HEAD_TILT_THRESHOLD/2 && isGridVisible) {
+      } else if (angleBetween > Math.PI/2 - HEAD_TILT_THRESHOLD/2 && isGridVisible) {
         // Head is back to normal, hide grid
         document.getElementById('photo-grid-container').style.display = 'none';
         isGridVisible = false;
         updateStatus('Photo grid hidden. Tilt head up to view again.');
       }
-      
-      lastHeadPitch = headPitch;
     }
     
     function handleControllerScroll() {
@@ -310,10 +321,22 @@
     }
 
     function render(timestamp, frame) {
+      // Always check head tilt in every frame
       checkHeadTilt(frame);
       
       if (controller && isGridVisible) {
         handleControllerScroll();
+      }
+      
+      // Add a debug indicator when in AR mode
+      if (frame && renderer.xr.isPresenting) {
+        const debugStatus = document.getElementById('status');
+        if (isGridVisible) {
+          debugStatus.style.display = 'block';
+          debugStatus.style.backgroundColor = 'rgba(0, 255, 0, 0.5)';
+        } else {
+          debugStatus.style.backgroundColor = 'rgba(0, 0, 0, 0.5)';
+        }
       }
       
       renderer.render(scene, camera);
