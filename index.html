@@ -56,15 +56,15 @@
       box-shadow: 0 4px 6px rgba(0,0,0,0.1);
     }
     #photo-grid-container {
-      position: fixed;
+      position: absolute;
       top: 0;
       left: 0;
-      width: 100vw;
-      height: 100vh;
+      width: 100%;
+      height: 100%;
+      display: none;
       perspective: 1000px;
       overflow: hidden;
-      z-index: 100;
-      pointer-events: none;
+      z-index: 0;
     }
     #photo-grid {
       width: 100%;
@@ -76,10 +76,8 @@
       grid-gap: 10px;
       padding: 10px;
       transform-origin: center top;
-      transform: rotateX(60deg) translateY(-30%);
-      background: rgba(0, 0, 0, 0.8);
-      backdrop-filter: blur(5px);
-      box-shadow: 0 0 30px rgba(0,0,0,0.7);
+      transform: rotateX(70deg) translateY(-50%);
+      background: rgba(0, 0, 0, 0.7);
     }
     .photo-item {
       width: 100%;
@@ -108,6 +106,9 @@
     </div>
   </div>
   
+  <!-- Debug display -->
+  <div id="debug" style="position: absolute; top: 60px; left: 20px; background: rgba(0,0,0,0.7); color: white; padding: 10px; border-radius: 5px; z-index: 100; display: none;"></div>
+  
   <script type="module">
     import * as THREE from 'three';
     import { ARButton } from 'https://unpkg.com/three@0.150.1/examples/jsm/webxr/ARButton.js';
@@ -117,8 +118,9 @@
     let controller;
     let isGridVisible = false;
     let lastControllerRotation = new THREE.Euler();
+    let lastHeadPitch = 0;
     const GRID_STEP = 200; // px per scroll
-    const HEAD_TILT_THRESHOLD = 0.4; // radians (approx 23 degrees)
+    const HEAD_TILT_THRESHOLD = 0.1; // radians (approx 5.7 degrees) - reduced to make detection more sensitive
     const CONTROLLER_ROTATION_THRESHOLD = 0.15; // radians
     let lastScrollTime = 0;
     const SCROLL_COOLDOWN = 300; // ms between scrolls
@@ -128,6 +130,12 @@
     function init() {
       // Create sample photos
       createSamplePhotoGrid();
+      
+      // Enable debug mode
+      const debugParam = new URLSearchParams(window.location.search).get('debug');
+      if (debugParam === 'true') {
+        document.getElementById('debug').style.display = 'block';
+      }
       
       scene = new THREE.Scene();
       camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20);
@@ -208,10 +216,16 @@
       renderer.xr.setReferenceSpaceType('local');
       renderer.xr.setSession(session);
       document.getElementById('start-button').style.display = 'none';
-      updateStatus('AR session started. Look UP toward the ceiling to see photo grid. Twist controller to scroll.');
-      
-      // Make photo grid container always present but initially invisible
-      document.getElementById('photo-grid-container').style.display = 'none';
+      updateStatus('AR session started. Tilt your head up to see photo grid. Twist controller to scroll.');
+
+      // Add an alternate trigger for the grid (debug purposes)
+      document.addEventListener('keydown', (e) => {
+        if (e.key === 'g') {
+          isGridVisible = !isGridVisible;
+          document.getElementById('photo-grid-container').style.display = isGridVisible ? 'block' : 'none';
+          updateStatus(isGridVisible ? 'Grid toggled ON (debug)' : 'Grid toggled OFF (debug)');
+        }
+      });
 
       setupController(session);
 
@@ -228,7 +242,7 @@
     function setupController() {
       controller = renderer.xr.getController(0);
       controller.addEventListener('connected', (event) => {
-        updateStatus(`Controller connected: ${event.data.handedness}. LOOK UP at the ceiling to see grid.`);
+        updateStatus(`Controller connected: ${event.data.handedness}. Tilt head up to see grid.`);
       });
       scene.add(controller);
 
@@ -252,33 +266,56 @@
       const viewerPose = frame.getViewerPose(renderer.xr.getReferenceSpace());
       if (!viewerPose) return;
       
-      // Get head orientation and position
-      const headOrientation = new THREE.Quaternion().fromArray(viewerPose.transform.orientation);
+      // Get the view matrix which contains camera orientation
+      const view = viewerPose.views[0];
+      const viewMatrix = new THREE.Matrix4().fromArray(view.transform.matrix);
       
-      // Create a direction vector pointing forward in head space
-      const forwardVector = new THREE.Vector3(0, 0, -1);
-      forwardVector.applyQuaternion(headOrientation);
+      // Extract rotation as Euler angles from the view matrix
+      const rotation = new THREE.Euler().setFromRotationMatrix(viewMatrix);
       
-      // Calculate the angle between forward vector and up vector
-      // This gives us a more reliable way to detect if user is looking up
-      const upVector = new THREE.Vector3(0, 1, 0);
-      const angleBetween = forwardVector.angleTo(upVector);
+      // Log rotation values for debugging
+      const debugElement = document.getElementById('debug');
+      if (debugElement.style.display !== 'none') {
+        debugElement.innerHTML = `
+          <strong>Head Rotation</strong><br>
+          X: ${(rotation.x * 180 / Math.PI).toFixed(2)}° (pitch)<br>
+          Y: ${(rotation.y * 180 / Math.PI).toFixed(2)}° (yaw)<br>
+          Z: ${(rotation.z * 180 / Math.PI).toFixed(2)}° (roll)<br>
+          <br>
+          Threshold: ${(HEAD_TILT_THRESHOLD * 180 / Math.PI).toFixed(2)}°<br>
+          Looking up: ${lookingUp ? 'YES' : 'NO'}<br>
+          Grid visible: ${isGridVisible ? 'YES' : 'NO'}
+        `;
+      }
       
-      console.log('Head angle:', THREE.MathUtils.radToDeg(angleBetween));
+      // Try different approaches to detect looking up
+      // Method 1: Check for negative pitch angle
+      const lookingUpMethod1 = rotation.x < -HEAD_TILT_THRESHOLD;
       
-      // We want to check if user is looking up (angle would be less than 90 degrees)
-      // Lower values mean looking more upward
-      if (angleBetween < Math.PI/2 - HEAD_TILT_THRESHOLD && !isGridVisible) {
+      // Method 2: Check for angle close to PI (another possible representation of looking up)
+      const lookingUpMethod2 = rotation.x > Math.PI - HEAD_TILT_THRESHOLD;
+      
+      // Method 3: Use camera's world direction
+      const cameraDirection = new THREE.Vector3(0, 0, -1);
+      cameraDirection.applyQuaternion(new THREE.Quaternion().setFromEuler(rotation));
+      const lookingUpMethod3 = cameraDirection.y > Math.sin(HEAD_TILT_THRESHOLD);
+      
+      // Use all methods together to increase chance of detection
+      const lookingUp = lookingUpMethod1 || lookingUpMethod2 || lookingUpMethod3;
+      
+      if (lookingUp && !isGridVisible) {
         // Head is tilted up, show grid
         document.getElementById('photo-grid-container').style.display = 'block';
         isGridVisible = true;
         updateStatus('Photo grid visible. Twist controller to scroll.');
-      } else if (angleBetween > Math.PI/2 - HEAD_TILT_THRESHOLD/2 && isGridVisible) {
+      } else if (!lookingUp && isGridVisible) {
         // Head is back to normal, hide grid
         document.getElementById('photo-grid-container').style.display = 'none';
         isGridVisible = false;
         updateStatus('Photo grid hidden. Tilt head up to view again.');
       }
+      
+      lastHeadPitch = rotation.x;
     }
     
     function handleControllerScroll() {
@@ -321,22 +358,10 @@
     }
 
     function render(timestamp, frame) {
-      // Always check head tilt in every frame
       checkHeadTilt(frame);
       
       if (controller && isGridVisible) {
         handleControllerScroll();
-      }
-      
-      // Add a debug indicator when in AR mode
-      if (frame && renderer.xr.isPresenting) {
-        const debugStatus = document.getElementById('status');
-        if (isGridVisible) {
-          debugStatus.style.display = 'block';
-          debugStatus.style.backgroundColor = 'rgba(0, 255, 0, 0.5)';
-        } else {
-          debugStatus.style.backgroundColor = 'rgba(0, 0, 0, 0.5)';
-        }
       }
       
       renderer.render(scene, camera);
