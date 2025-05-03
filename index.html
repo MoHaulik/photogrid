@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>WebXR AR Photo Grid Viewer</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+
+  <!-- Import map to resolve bare module specifiers -->
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.150.1/build/three.module.js"
+    }
+  }
+  </script>
+
+  <style>
+    body { 
+      margin: 0; 
+      overflow: hidden;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    }
+    #overlay {
+      position: absolute;
+      top: 20px;
+      left: 20px;
+      z-index: 1;
+    }
+    #start-button {
+      padding: 12px 24px;
+      font-size: 18px;
+      background: rgba(72, 118, 255, 0.8);
+      color: white;
+      border: none;
+      border-radius: 30px;
+      box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+      cursor: pointer;
+      transition: all 0.3s ease;
+    }
+    #start-button:hover {
+      background: rgba(72, 118, 255, 1);
+      transform: translateY(-2px);
+      box-shadow: 0 6px 12px rgba(0,0,0,0.3);
+    }
+    #status {
+      margin-top: 15px;
+      font-size: 16px;
+      background: rgba(0, 0, 0, 0.5);
+      color: white;
+      padding: 10px 15px;
+      border-radius: 12px;
+      display: none;
+      backdrop-filter: blur(5px);
+      box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+    }
+    #photo-grid-container {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      display: none;
+      perspective: 1000px;
+      overflow: hidden;
+      z-index: 0;
+    }
+    #photo-grid {
+      width: 100%;
+      height: 100%;
+      overflow-y: auto;
+      overflow-x: hidden;
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      grid-gap: 10px;
+      padding: 10px;
+      transform-origin: center top;
+      transform: rotateX(70deg) translateY(-50%);
+      background: rgba(0, 0, 0, 0.7);
+    }
+    .photo-item {
+      width: 100%;
+      aspect-ratio: 1;
+      background-color: #333;
+      border-radius: 8px;
+      overflow: hidden;
+      box-shadow: 0 4px 8px rgba(0,0,0,0.3);
+    }
+    .photo-item img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+  </style>
+</head>
+<body>
+  <div id="overlay">
+    <button id="start-button">Start AR Experience</button>
+    <div id="status"></div>
+  </div>
+  
+  <div id="photo-grid-container">
+    <div id="photo-grid">
+      <!-- Photo grid items will be generated here -->
+    </div>
+  </div>
+  
+  <script type="module">
+    import * as THREE from 'three';
+    import { ARButton } from 'https://unpkg.com/three@0.150.1/examples/jsm/webxr/ARButton.js';
+    import { GLTFLoader } from 'https://unpkg.com/three@0.150.1/examples/jsm/loaders/GLTFLoader.js';
+
+    let camera, scene, renderer;
+    let controller;
+    let isGridVisible = false;
+    let lastControllerRotation = new THREE.Euler();
+    let lastHeadPitch = 0;
+    const GRID_STEP = 200; // px per scroll
+    const HEAD_TILT_THRESHOLD = 0.2; // radians (approx 11.5 degrees)
+    const CONTROLLER_ROTATION_THRESHOLD = 0.15; // radians
+    let lastScrollTime = 0;
+    const SCROLL_COOLDOWN = 300; // ms between scrolls
+    
+    init();
+
+    function init() {
+      // Create sample photos
+      createSamplePhotoGrid();
+      
+      scene = new THREE.Scene();
+      camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20);
+
+      renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.xr.enabled = true;
+      renderer.setClearColor(0x000000, 0);
+      renderer.shadowMap.enabled = true;
+      document.body.appendChild(renderer.domElement);
+
+      const ambientLight = new THREE.AmbientLight(0x404040, 2);
+      scene.add(ambientLight);
+
+      const directionalLight = new THREE.DirectionalLight(0xffffff, 1.5);
+      directionalLight.position.set(1, 1, 1);
+      directionalLight.castShadow = true;
+      scene.add(directionalLight);
+
+      document.getElementById('start-button').addEventListener('click', () => {
+        if (navigator.xr) {
+          navigator.xr.isSessionSupported('immersive-ar').then((supported) => {
+            if (supported) {
+              const sessionInit = { 
+                requiredFeatures: ['hit-test'],
+                optionalFeatures: ['dom-overlay'], 
+                domOverlay: { root: document.body } 
+              };
+              navigator.xr.requestSession('immersive-ar', sessionInit).then(onSessionStarted);
+            } else {
+              updateStatus('WebXR AR session is not supported on this device.');
+            }
+          });
+        } else {
+          updateStatus('WebXR is not supported in this browser.');
+        }
+      });
+
+      window.addEventListener('resize', onWindowResize);
+    }
+
+    function createSamplePhotoGrid() {
+      const photoGrid = document.getElementById('photo-grid');
+      const colors = [
+        '#FF5733', '#33FF57', '#3357FF', '#F3FF33', '#FF33F3', 
+        '#33FFF3', '#FF8033', '#8033FF', '#33FF80', '#FF3380'
+      ];
+      
+      // Create 30 photo squares (10 rows of 3 columns)
+      for (let i = 0; i < 30; i++) {
+        const photoItem = document.createElement('div');
+        photoItem.className = 'photo-item';
+        photoItem.style.backgroundColor = colors[i % colors.length];
+        photoItem.textContent = `Photo ${i+1}`;
+        photoItem.style.display = 'flex';
+        photoItem.style.justifyContent = 'center';
+        photoItem.style.alignItems = 'center';
+        photoItem.style.color = '#fff';
+        photoItem.style.fontSize = '20px';
+        photoItem.style.fontWeight = 'bold';
+        photoGrid.appendChild(photoItem);
+      }
+    }
+
+    function updateStatus(message) {
+      const statusElement = document.getElementById('status');
+      statusElement.style.display = 'block';
+      statusElement.textContent = message;
+    }
+
+    function onWindowResize() {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+
+    function onSessionStarted(session) {
+      renderer.xr.setReferenceSpaceType('local');
+      renderer.xr.setSession(session);
+      document.getElementById('start-button').style.display = 'none';
+      updateStatus('AR session started. Tilt your head up to see photo grid. Twist controller to scroll.');
+
+      setupController(session);
+
+      renderer.setAnimationLoop(render);
+      session.addEventListener('end', onSessionEnd);
+    }
+
+    function onSessionEnd() {
+      updateStatus('AR session ended');
+      document.getElementById('start-button').style.display = 'block';
+      document.getElementById('photo-grid-container').style.display = 'none';
+    }
+
+    function setupController() {
+      controller = renderer.xr.getController(0);
+      controller.addEventListener('connected', (event) => {
+        updateStatus(`Controller connected: ${event.data.handedness}. Tilt head up to see grid.`);
+      });
+      scene.add(controller);
+
+      const controllerGeometry = new THREE.CylinderGeometry(0.01, 0.02, 0.1, 16);
+      const controllerMaterial = new THREE.MeshStandardMaterial({
+        roughness: 0.3,
+        metalness: 0.5
+      });
+      const controllerMesh = new THREE.Mesh(controllerGeometry, controllerMaterial);
+      controllerMesh.material.color.setHex(0xFF4500);
+      controllerMesh.rotation.x = Math.PI / 2;
+      controller.add(controllerMesh);
+
+      // Initialize controller rotation
+      lastControllerRotation = new THREE.Euler().setFromQuaternion(controller.quaternion, 'XYZ');
+    }
+
+    function checkHeadTilt(frame) {
+      if (!frame) return;
+      
+      const viewerPose = frame.getViewerPose(renderer.xr.getReferenceSpace());
+      if (!viewerPose) return;
+      
+      // Get head rotation
+      const headOrientation = new THREE.Quaternion().fromArray(viewerPose.transform.orientation);
+      const headEuler = new THREE.Euler().setFromQuaternion(headOrientation);
+      
+      // Check if looking up (negative pitch in this coordinate system)
+      const headPitch = headEuler.x;
+      
+      if (headPitch < -HEAD_TILT_THRESHOLD && !isGridVisible) {
+        // Head is tilted up, show grid
+        document.getElementById('photo-grid-container').style.display = 'block';
+        isGridVisible = true;
+        updateStatus('Photo grid visible. Twist controller to scroll.');
+      } else if (headPitch >= -HEAD_TILT_THRESHOLD/2 && isGridVisible) {
+        // Head is back to normal, hide grid
+        document.getElementById('photo-grid-container').style.display = 'none';
+        isGridVisible = false;
+        updateStatus('Photo grid hidden. Tilt head up to view again.');
+      }
+      
+      lastHeadPitch = headPitch;
+    }
+    
+    function handleControllerScroll() {
+      if (!controller || !isGridVisible) return;
+      
+      // Current time check for scroll cooldown
+      const now = Date.now();
+      if (now - lastScrollTime < SCROLL_COOLDOWN) return;
+      
+      // Current Euler from controller quaternion
+      const rot = new THREE.Euler().setFromQuaternion(controller.quaternion, 'XYZ');
+      
+      // Calculate twist (rotation around Z axis)
+      const dTwist = rot.z - lastControllerRotation.z;
+      
+      if (Math.abs(dTwist) > CONTROLLER_ROTATION_THRESHOLD) {
+        if (dTwist > 0) {
+          scrollDownPhotoGrid();
+          updateStatus('Scrolled down photo grid');
+        } else {
+          scrollUpPhotoGrid();
+          updateStatus('Scrolled up photo grid');
+        }
+        // Update last scroll time
+        lastScrollTime = now;
+      }
+      
+      // Update last rotation
+      lastControllerRotation.copy(rot);
+    }
+
+    function scrollUpPhotoGrid() {
+      const photoGrid = document.getElementById('photo-grid');
+      photoGrid.scrollBy({ top: -GRID_STEP, behavior: 'smooth' });
+    }
+
+    function scrollDownPhotoGrid() {
+      const photoGrid = document.getElementById('photo-grid');
+      photoGrid.scrollBy({ top: GRID_STEP, behavior: 'smooth' });
+    }
+
+    function render(timestamp, frame) {
+      checkHeadTilt(frame);
+      
+      if (controller && isGridVisible) {
+        handleControllerScroll();
+      }
+      
+      renderer.render(scene, camera);
+    }
+  </script>
+</body>
+</html>
